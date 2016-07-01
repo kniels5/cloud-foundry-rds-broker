@@ -1,0 +1,42 @@
+<RestClientRequest>
+    <option name="biscuits">
+        <list/>
+    </option>
+    <option name="httpMethod" value="DELETE"/>
+    <option name="urlBase" value="http://demouser:demopassword@localhost:5001"/>
+    <option name="urlPath" value="/v2/service_instances/34D6B05"/>
+    <option name="headers">
+        <list>
+            <KeyValuePair>
+                <option name="key" value="Accept"/>
+                <option name="value" value="*/*"/>
+            </KeyValuePair>
+            <KeyValuePair>
+                <option name="key" value="Cache-Control"/>
+                <option name="value" value="no-cache"/>
+            </KeyValuePair>
+            <KeyValuePair>
+                <option name="key" value="x-broker-api-version"/>
+                <option name="value" value="2.4"/>
+            </KeyValuePair>
+            <KeyValuePair>
+                <option name="key" value="X"/>
+                <option name="value" value="PUT"/>
+            </KeyValuePair>
+            <KeyValuePair>
+                <option name="key" value="Content-Type"/>
+                <option name="value" value="application/json"/>
+            </KeyValuePair>
+        </list>
+    </option>
+    <option name="parameters">
+        <list/>
+    </option>
+    <option name="parametersEnabled" value="true"/>
+    <option name="haveTextToSend" value="false"/>
+    <option name="haveFileToSend" value="false"/>
+    <option name="isFileUpload" value="false"/>
+    <option name="textToSend"
+            value="{&quot;plan_id&quot;:&quot;49974401-BB86-446E-975C-9BDA0B93D444&quot;,&quot;organization_guid&quot;:&quot;1234&quot;,&quot;space_guid&quot;:&quot;5678&quot;,&quot;service_id&quot;:&quot;34D6B053-D7EB-46FF-ABC5-B3DFB5D02759&quot; }"/>
+    <option name="filesToSend" value="/Users/keithnielsenwork/ServiceBrokers/cloud-foundry-rds-broker/test"/>
+</RestClientRequest>
