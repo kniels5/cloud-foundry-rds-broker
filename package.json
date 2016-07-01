@@ -11,6 +11,7 @@
     "aws-sdk" : "2.1.6",
     "async" : "^0.6.2",
     "handlebars" : "2.0.0",
-    "restify" : "2.8.5"
+    "restify" : "2.8.5",
+    "vault-client" : "0.1.0"
   }
 }

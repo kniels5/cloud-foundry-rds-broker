@@ -4,10 +4,10 @@ applications:
   disk: 1024M
   instances: 1
   env:
-    AWS_ACCESS_KEY_ID: fillin
-    AWS_SECRET_ACCESS_KEY: fillin
-    AWS_REGION: eu-central-1
-    AWS_DBSUBNET_GROUP_NAME: stackato-db-subnet-group
+    AWS_ACCESS_KEY_ID: AKIAJ5GCT75ZDKIPR27A
+    AWS_SECRET_ACCESS_KEY: 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
+    AWS_REGION: us-west-2
+    AWS_DBSUBNET_GROUP_NAME: default
     SERVICE_BROKER_USERNAME: demouser
     SERVICE_BROKER_PASSWORD: demopassword
   stackato:

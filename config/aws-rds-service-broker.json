@@ -1,6 +1,6 @@
 {
   "catalog": {
-    "apiVersion": "2.3.0",
+    "apiVersion": "2.8.0",
     "defaultVersion": "1.0",
     "name": "awsrds",
     "url": "auto",
@@ -8,62 +8,182 @@
       {
         "id": "34D6B053-D7EB-46FF-ABC5-B3DFB5D02759",
         "bindable": true,
-        "name": "mysql",
+        "name": "mariaDB",
         "version": "1.0",
-        "description": "MySQL RDS service",
+        "description": "MariaDB AWS RDS Service",
         "metadata": {
-          "providerDisplayName": "AWSRDS",
+          "providerDisplayName": "AWS RDS",
           "tags": [
             "AWS",
-            "MySQL",
+            "MariaDB",
             "RDS"
           ]
         },
         "plans": [
           {
-            "name": "default",
+            "name": "Small-Plan",
             "id": "49974401-BB86-446E-975C-9BDA0B93D444",
-            "description": "Small 5Gb non-HA MySQL database",
-            "public": true,
-            "free": true
+            "description": "Smallest plan to be used for research and development",
+            "public": false,
+            "free": false,
+            "metadata":{
+              "bullets":[
+                "AWS Instance Type: db.t2.small",
+                "Network Performance: Low",
+                "Availability Zones: Single",
+                "Tenancy: Single",
+                "Storage: 5GB",
+                "Memory: 2GB",
+                "vCPU: 1"
+              ],
+              "costs":[
+                {
+                  "amount":{
+                    "usd":25.00
+                  },
+                  "unit":"MONTHLY"
+                },
+                {
+                  "amount":{
+                    "usd":299.00
+                  },
+                  "unit":"YEARLY"
+                }
+              ],
+              "displayName":"Small Plan - Research & Development"
+            }
           },
           {
-            "name": "10gb",
+            "name": "Medium-Plan",
             "id": "D4AA6ECE-C79A-43E7-B04B-3B9B7F9F7790",
-            "description": "10Gb HA MySQL database.",
-            "public": true,
-            "free": true
-          }
-        ]
-      },
-      {
-        "id": "97A401C9-F07F-4CB6-A013-DC3DBC5B2A00",
-        "bindable": true,
-        "name": "postgres",
-        "version": "1.0",
-        "description": "Postgres RDS service",
-        "metadata": {
-          "providerDisplayName": "AWSRDS",
-          "tags": [
-            "AWS",
-            "Postgres",
-            "RDS"
-          ]
-        },
-        "plans": [
-          {
-            "name": "default",
-            "id": "AC9998F9-88D4-4330-8BBD-18BCDF9DEA02",
-            "description": "Small 5Gb non-HA Postgres database",
-            "public": true,
-            "free": true
+            "description": "Medium plan to be used for development workloads with lower throughput and moderate availability targets",
+            "public": false,
+            "free": false,
+            "metadata":{
+              "bullets":[
+                "AWS Instance Type: db.t2.medium",
+                "Network Performance: Moderate",
+                "Availability Zones: Single",
+                "Tenancy: Single",
+                "Storage: 5GB",
+                "Memory: 4GB",
+                "vCPU: 2"
+              ],
+              "costs":[
+                {
+                  "amount":{
+                    "usd":50.00
+                  },
+                  "unit":"MONTHLY"
+                },
+                {
+                  "amount":{
+                    "usd":598.00
+                  },
+                  "unit":"YEARLY"
+                }
+              ],
+              "displayName":"Medium Plan - No HA"
+            }
           },
           {
-            "name": "10gb",
-            "id": "0101DAEC-A8B4-4A83-A464-D667D47A4E7F",
-            "description": "10Gb HA Postgres database.",
-            "public": true,
-            "free": true
+            "name": "Medium-Plan-HA",
+            "id": "B4A456CE-C79A-43E7-B04B-3B9C639F4323",
+            "description": "Medium plan apporpriate for production workloads with moderate throughput and high availability targets",
+            "public": false,
+            "free": false,
+            "metadata":{
+              "bullets":[
+                "AWS Instance Type: db.t2.medium",
+                "Network Performance: Moderate",
+                "Availability Zones: Multiple",
+                "Tenancy: Single",
+                "Storage: 5GB",
+                "Memory: 4GB",
+                "vCPU: 2"
+              ],
+              "costs":[
+                {
+                  "amount":{
+                    "usd":100.00
+                  },
+                  "unit":"MONTHLY"
+                },
+                {
+                  "amount":{
+                    "usd":1208.00
+                  },
+                  "unit":"YEARLY"
+                }
+              ],
+              "displayName":"Medium Plan - With HA"
+            }
+          },
+          {
+            "name": "Large-Plan",
+            "id": "Q2A46ECE-T79A-53E7-B04B-3B9C639F4654",
+            "description": "Large plan to be used for production workloads with higher throughput and moderate availability targets",
+            "public": false,
+            "free": false,
+            "metadata":{
+              "bullets":[
+                "AWS Instance Type: db.m4.xlarge",
+                "Network Performance: High",
+                "Availability Zones: Single",
+                "Tenancy: Single or Multiple",
+                "Storage:100GB",
+                "Memory: 16GB",
+                "vCPU: 4"
+              ],
+              "costs":[
+                {
+                  "amount":{
+                    "usd":265.00
+                  },
+                  "unit":"MONTHLY"
+                },
+                {
+                  "amount":{
+                    "usd":3184.00
+                  },
+                  "unit":"YEARLY"
+                }
+              ],
+              "displayName":"Large Plan - No HA"
+            }
+          },
+          {
+            "name": "Large-Plan-HA",
+            "id": "V4AA6EDE-Q79A-V3E7-304B-XB9C639F4325",
+            "description": "Large plan to be used for production workloads with higher throughput and availability targets",
+            "public": false,
+            "free": false,
+            "metadata":{
+              "bullets":[
+                "AWS Instance Type: db.m4.xlarge",
+                "Network Performance: High",
+                "Availability Zones: Multiple",
+                "Tenancy: Single or Multiple",
+                "Storage:100GB",
+                "Memory: 16GB",
+                "vCPU: 4"
+              ],
+              "costs":[
+                {
+                  "amount":{
+                    "usd":535.00
+                  },
+                  "unit":"MONTHLY"
+                },
+                {
+                  "amount":{
+                    "usd":6425.00
+                  },
+                  "unit":"YEARLY"
+                }
+              ],
+              "displayName":"Large Plan - HA"
+            }
           }
         ]
       }
@@ -71,66 +191,24 @@
   },
   "plans": {
     "49974401-BB86-446E-975C-9BDA0B93D444": {
-      "parameters" : {
-        "DBInstanceIdentifier": "cfdb",
-        "AllocatedStorage": 5,
-        "DBInstanceClass": "db.t2.micro",
-        "Engine": "MySQL",
-        "MasterUsername": "root",
-        "AutoMinorVersionUpgrade": true,
-        "BackupRetentionPeriod": 5,
-        "DBName": "mydb",
-        "StorageType": "gp2",
-        "PubliclyAccessible": false
-      },
-      "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}"
+      "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}",
+      "formation_name": "plan1-mariadb_v1.json"
     },
     "D4AA6ECE-C79A-43E7-B04B-3B9B7F9F7790": {
-      "parameters" : {
-        "DBInstanceIdentifier": "cfdb",
-        "AllocatedStorage": 10,
-        "DBInstanceClass": "db.t2.micro",
-        "Engine": "MySQL",
-        "MasterUsername": "root",
-        "AutoMinorVersionUpgrade": true,
-        "BackupRetentionPeriod": 5,
-        "DBName": "mydb",
-        "PubliclyAccessible": false,
-        "StorageType": "gp2",
-        "MultiAZ": true
-      },
-      "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}"
+      "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}",
+      "formation_name": "plan2a-mariadb_v1.json"
     },
-    "AC9998F9-88D4-4330-8BBD-18BCDF9DEA02": {
-      "parameters" : {
-        "DBInstanceIdentifier": "cfdb",
-        "AllocatedStorage": 5,
-        "DBInstanceClass": "db.t2.micro",
-        "Engine": "postgres",
-        "MasterUsername": "root",
-        "AutoMinorVersionUpgrade": true,
-        "BackupRetentionPeriod": 5,
-        "DBName": "mydb",
-        "StorageType": "gp2",
-        "PubliclyAccessible": false
-      },
-      "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}"
-  },
-    "0101DAEC-A8B4-4A83-A464-D667D47A4E7F": {
-      "parameters" : {
-        "DBInstanceIdentifier": "cfdb",
-        "AllocatedStorage": 10,
-        "DBInstanceClass": "db.t2.micro",
-        "Engine": "postgres",
-        "MasterUsername": "root",
-        "AutoMinorVersionUpgrade": true,
-        "BackupRetentionPeriod": 5,
-        "DBName": "mydb",
-        "PubliclyAccessible": false,
-        "StorageType": "gp2",
-        "MultiAZ": true
-      },
-      "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}"
+    "B4A456CE-C79A-43E7-B04B-3B9C639F4323": {
+      "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}",
+      "formation_name": "plan2b-mariadb_v1.json"
+    },
+    "Q2A46ECE-T79A-53E7-B04B-3B9C639F4654": {
+      "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}",
+      "formation_name": "plan3a-mariadb_v1.json"
+    },
+    "V4AA6EDE-Q79A-V3E7-304B-XB9C639F4325": {
+      "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}",
+      "formation_name": "plan3b-mariadb_v1.json"
     }
   }
 }
