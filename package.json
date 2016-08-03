@@ -11,7 +11,14 @@
     "aws-sdk" : "2.1.6",
     "async" : "^0.6.2",
     "handlebars" : "2.0.0",
-    "restify" : "2.8.5",
-    "vault-client" : "0.1.0"
+    "restify": "4.1.1" ,
+    "vault-client": "0.1.0" ,
+    "consul": "0.25.0" ,
+    "vaulted": "3.1.0" ,
+    "node-vault": "0.5.1" ,
+    "password-generator": "2.0.2" ,
+    "async-polling": "0.2.1" ,
+    "assert": "1.4.1" ,
+    "axios": "0.13.1"
   }
 }

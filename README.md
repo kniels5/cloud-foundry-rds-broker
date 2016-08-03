@@ -1,6 +1,6 @@
 # AWS RDS Service Broker
-A configurable Cloud Foundry Service Broker, complying to version 2.4 of the interface specification
-:quy
+A configurable Cloud Foundry Service Broker, complying to version 2.8 of the interface specification
+
 
 * provision: The service broker will create a Amazon RDS database instance, parameters and password stored as tag with the instance
 * bind: search for the specified service instance with a matching tag and return the credentials.
@@ -10,7 +10,7 @@ A configurable Cloud Foundry Service Broker, complying to version 2.4 of the int
 The bind and unbind does not keep any registration. The service broker is stateless as it  does not store any
 information on the local file system and is stateless. This means you can deploy multiple instances of the broker for HA purposes.
 
-This service broker was tested on Stackato.
+This service broker was tested on Pivotal Cloud Foundry
 
 ## config
 The catalog of services and plans is defined in the file config/aws-rds-service-broker.json.

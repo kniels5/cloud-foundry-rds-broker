@@ -35,19 +35,41 @@
 /**
  * Declare All Dependencies
  */
+class VaultClient {
+    constructor() {
+        this.clientToken = "";
+        this.restifyClient = null;
+    }
+
+    isAuthenticated() {
+        if (this.clientToken == "") {
+            return false;
+        }
+        return true;
+    }
+
+    configureRestifyClient() {
+        var options = {
+            url: process.env.VAULT_ADDR,
+            //headers: {
+            //        'X-VAULT-TOKEN':this.clientToken
+            //}
+        };
+        this.restifyClient = restify.createJSONClient(options);
+    }
+}
 var config = require('./config/aws-rds-service-broker');
 //TODO: Replace with DB like Redis/MariaDB in order to support mutiple brokers
-var instances = new Map();
-//Load the Plans, i.e. Cloud Formations
-var smallPlan = require('./config/plan1-mariadb_v1');
-var mediumPlanNoHA = require('./config/plan2a-mariadb_v1');
-var mediumPlanHA = require('./config/plan2b-mariadb_v1');
-var largePlanNonHA = require('./config/plan3a-mariadb_v1');
-var largePlanHA = require('./config/plan3b-mariadb_v1');
-var scommon = require('./security-common');
+var instances = {};
+var generatePassword = require('password-generator');
+var assert = require('assert');
 var restify = require('restify');
 var async = require('async');
 var Handlebars = require('handlebars');
+var aws = require('aws-sdk');
+var AsyncPolling = require('async-polling');
+//var Vaulted = require('vaulted');
+var axios = require('axios');
 
 /* following configs are determined by environment variables */
 config.credentials = {};
@@ -68,7 +90,7 @@ config.credentials.authPassword = (process.env.SERVICE_BROKER_PASSWORD);
 config.aws = {};
 config.aws.Region = (process.env.AWS_REGION);
 config.aws.DBSubnetGroupName = (process.env.AWS_DBSUBNET_GROUP_NAME);
-var aws = require('aws-sdk');
+
 aws.config.region = config.aws.Region;
 var rds = new aws.RDS();
 var iam = new aws.IAM();
@@ -89,13 +111,14 @@ var server = restify.createServer({
 //Create a handler(function) to ensure that the broker enforces a specific api version (2.8 is latest)
 server.use(apiVersionChecker({
     'major': 2,
-    'minor': 4
+    'minor': 8
 }));
 
 server.use(restify.authorizationParser());
-server.use(authenticate(config.credentials));
+server.use(authenticateBrokerCaller(config.credentials, server));
 server.use(restify.fullResponse());
 server.use(restify.bodyParser());
+server.use(restify.queryParser());
 server.pre(restify.pre.userAgentConnection());
 
 //--------------------End Server Configuration---------------------
@@ -114,34 +137,109 @@ function compileTemplates() {
 }
 
 /**--------------------------------------------------------------------------
+ *
  * Map broker api /v2/catalog to a return of the catalog - this will return
  * the details for the plans configured in the json file
- ----------------------------------------------------------------------------*/
+ *
+ *--------------------------------------------------------------------------*/
 server.get('/v2/catalog', function(request, response, next) {
     //catalog loaded from json file on server startup
     response.send(config.catalog);
     next();
 });
 
-//--------------------------End /v2/catalog broker API------------------------
+function composeResponse(instanceId, status, response, data) {
+    var returnMsg;
+    updateStatus(instanceId, null, null, null, status);
+    returnMsg = {state: status};
+    //returnMsg.description= data.Message;
+    response.send(200, returnMsg);
+}
+/**---------------------------------------------------------------------------
+ *
+ * Determine the return status from the AWS Describe Stacks Call:
+ *  1) Update the instance status appropriately or delete it if appropriate
+ *  2) Return appropriate message to client
+ *
+ *---------------------------------------------------------------------------*/
+
+function determineAWSReturnStatus(instanceId, data, response) {
+    var status = data.Stacks[0].StackStatus;
+
+    switch (status) {
+        case "CREATE_IN_PROGRESS":
+            composeResponse(instanceId, "in progress", response, data);
+            break;
+        case "CREATE_FAILED":
+            composeResponse(instanceId, "failed", response, data);
+            break;
+        case "CREATE_COMPLETE":
+            composeResponse(instanceId, "succeeded", response, data);
+            break;
+        case "DELETE_IN_PROGRESS":
+            composeResponse(instanceId, "in progress", response, data);
+            break;
+        case "DELETE_FAILED":
+            //want to try multiple times to delete to avoid orphans
+            if (instances[instanceId].state == "in progress") {
+                //first attempt at deleting, force cloud controller to try again
+                updateStatus(instanceId, null, null, null, "deleting");
+                var returnMsg = {state: "in progress"};
+                response.send(200, returnMsg);
+            }
+            else {
+                composeResponse(instanceId, "failed", response, data);
+            }
+            break;
+        case "DELETE_COMPLETE":
+            composeResponse(instanceId, "succeeded", response, data);
+            break;
+        default:
+            composeResponse(instanceId, "failed", response, data);
+    }
+}
+
 /**---------------------------------------------------------------------------------------------------------------------
  * Map broker api /v2/service_instances/<instance id>/last_operation
  *
  * This will support by client (e.g. cloud controller) to see the state of the last operation
  *
- * AWS provisioning will be asynchronous so binding will have to be a subsequent step
- *              1) Org ID - this uniquely identifies the organization in PCF that requested the instance
- *              2) Space ID - this uniquely identifies the space in PCF that requested the instance
- *              3) Service ID - this uniquely identifies the service in Cloud Foundry, e.g. MariaDB
- *              4) Instance ID - this uniquely identifies the instance of the service, this ID is generated by the
- *                               Cloud Controller and is part of url not json request params
- *              5) Plan ID - this uniquely identifies the attributes of the instance, e.g. physical resources, iiops,etc
+ * AWS provisioning will be asynchronous so binding will have to be a subsequent step, i.e. provisioning will create
+ * the root credentials for the database, but an app account will be generated during the binding call
  *
- *     See http://docs.cloudfoundry.org/services/api.html for more info
+ * See http://docs.cloudfoundry.org/services/api.html for more info
  *
  ---------------------------------------------------------------------------------------------------------------------*/
 server.put('/v2/service_instances/:instance_id/last_operation', function(request, response, next) {
-    
+    if (!request.params.hasOwnProperty("instance_id")) {
+        response.send(500, "The instance was not specified");
+        next();
+    }
+    else if (!(request.params.instance_id in instances)) {
+        //if not found assume it was deleted successfully
+        //cloud controller not expecting a response body
+        response.send(410);
+        next();
+    }
+    else {
+        var stackName = instances[request.params.instance_id].stackId;
+        var params = {StackName: stackName};
+
+        cloudFormation.describeStacks(params, function (err, data) {
+            if (err != null) {
+                console.log(err, err.stack);
+                // an error occurred - dont update status
+                //TODO: Figure out cloud controllers response to various error codes
+                response.send(500, err.code + ":" + err.stack);
+            }
+            else {
+                // successful response
+                console.log(data);
+                determineAWSReturnStatus(request.params.instance_id, data, response);
+            }
+        });
+        next();
+    }
 });
 /**---------------------------------------------------------------------------------------------------------------------
  * Map broker api /v2/service_instances/<instance id> to provisioning of new instance based on passed in parameters
@@ -158,18 +256,47 @@ server.put('/v2/service_instances/:instance_id/last_operation', function(request
  ---------------------------------------------------------------------------------------------------------------------*/
 server.put('/v2/service_instances/:id', function(request, response, next) {
     var msg = validateProvisioningRequest(request);
+    var vaultClient = new VaultClient();
+    vaultClient.configureRestifyClient();
+
+    /**testing vaulted client
+     var myVault = new Vaulted({
+        vault_host: 'http://52.41.9.191',
+            vault_port: 8200,
+            vault_ssl: false
+    });
+
+     myVault.setToken(process.env.VAULT_TOKEN);
+     var status = {sealed:false};
+     myVault.setStatus(status);
+
+     myVault.prepare()
+     .then(function () {
+            console.log('Vault is now ready!');
+        });
+     myVault.createAuthMount('app-id');
+
+     var options = {user_id:'cloud-controller-cfd2',
+                   app_id:'cfd2-rds-broker'};
+     var loginPromise = myVault.appLogin(options,'app-id');*/
+    var vaultAxiosClient = axios.create({
+        baseURL: process.env.VAULT_ADDR
+
+    });
+
     if(msg!=""){
         response.send(422,msg);
         next();
     }
     else {
-        createRDSFromFormation(request, response, next, config.plans[request.params.plan_id]);
+        createRDSFromFormation(request, response, next, config.plans[request.params.plan_id], vaultClient);
     }
 });
 
 //---------------------------------------End /v2/service_instances/:id  broker API--------------------------------------
 
 /**---------------------------------------------------------------------------------------------------------------------
+ *
  * Map broker api /v2/service_instances/<instance id> to de-provisioning of existing instance
  *              1) Service ID - this uniquely identifies the service in Cloud Foundry, e.g. MariaDB
  *              2) Instance ID - this uniquely identifies the instance of the service, this ID is generated by the
@@ -180,47 +307,58 @@ server.put('/v2/service_instances/:id', function(request, response, next) {
  *
  * TODO: Once vault is integrated will have to remove credentials associated with this instance
  ---------------------------------------------------------------------------------------------------------------------*/
-server.del('/v2/service_instances/:id', function(req, response, next) {
-    getAllDbInstances(new DbInstanceIdFilter(req.params.id), function(err, allMatchingInstances) {
-        var instance, params;
+server.del('/v2/service_instances/:instance_id', function (request, response) {
 
-        if (!err && allMatchingInstances && allMatchingInstances.length > 0) {
-            instance = allMatchingInstances[0];
-            params = {
-                DBInstanceIdentifier: instance.DBInstanceIdentifier
-            };
+    //must support async calls
+    if (!request.params.hasOwnProperty("accepts_incomplete") || !request.params.accepts_incomplete) {
+        var msg = {
+            error: "AsyncRequired",
+            description: "This service plan requires client support for asynchronous service operations."
+        };
+        response.send(422, msg);
+        return;
+    }
 
-            if (instance.DBInstanceStatus !== "creating") {
-                params.FinalDBSnapshotIdentifier = ('Final-snapshot-' + instance.DBInstanceIdentifier);
-                params.SkipFinalSnapshot = false;
-            } else {
-                params.SkipFinalSnapshot = true;
-            }
-
-            rds.deleteDBInstance(params, function(err, rdsResponse) {
-                if (!err) {
-                    response.send({});
-                } else {
-                    response.send(500, {
-                        'description': err
-                    });
-                    console.log(err);
+    //must specify the instance to delete, this should never happen with Cloud Controller making requests
+    if (!request.params.hasOwnProperty("instance_id")) {
+        response.send(500, "The instance was not specified");
+    }
+    else if (!(request.params.instance_id in instances)) {
+        //if not found assume it was deleted successfully
+        //cloud controller not expecting a response body
+        response.send(410);
+    }
+    //the instance exists
+    else {
+        //this should only ever be executed once, since deletes are async, "last_operation" would be subsequently
+        //called so some of this logic could be removed since cloud controller shouldnt call delete twice for same
+        //instance
+        var stackName = instances[request.params.instance_id].stackId;
+        var status = instances[request.params.instance_id].status;
+        var params = {StackName: stackName};
+        cloudFormation.deleteStack(params, function (err, data) {
+            //error deleting, assume that the stack doesnt exist
+            if (err != null) {
+                console.log(err, err.stack);
+                // an error occurred - if the previous status is "deleting" remove the instance
+                if (status == "deleting") {
+                    updateStatus(request.params.instance_id, null, null, "remove");
+                    response.send(200);
                 }
-            });
-        } else {
-            if (!err) {
-                response.send(410, {
-                    'description': "instance no longer exists"
-                });
-            } else {
-                response.send(500, {
-                    'description': err
-                });
-                console.log(err);
+                else {
+                    //wasn't previously "deleting" so update to deleting and force cloud controller to try again
+                    updateStatus(request.params.instance_id, null, null, "deleting");
+                    response.send(202);
+                }
             }
-        }
-        next();
-    });
+            else {
+                // successful response - mark the status as "deleting"
+                console.log(data);
+                updateStatus(request.params.instance_id, null, null, "deleting");
+                response.send(202);
+            }
+        });
+    }
 });
 
 //---------------------------------------End /v2/service_instances/:id broker API---------------------------------------
@@ -391,167 +529,6 @@ function getInstanceId(instance) {
 }
 
 
-
-// iterates through all database instances, getting their tags, their
-function getAllDbInstances(filter, functionCallback) {
-    var RdsArnPrefix = null,
-        AwsAccountId = null,
-        dbInstances = [];
-
-    function addTagsToDBInstances(dbinstance, callback) {
-        rds.listTagsForResource({
-                'ResourceName': RdsArnPrefix + dbinstance.DBInstanceIdentifier
-            },
-            function(err, tags) {
-                if (err) {
-                    callback(err, null);
-                } else {
-                    if (tags) {
-                        dbinstance.TagList = tags.TagList;
-                    } else {
-                        dbinstance.TagList = [];
-                    }
-                    callback(null, dbinstance);
-                }
-            });
-    }
-
-    //async is a module that runs in this case a series of tasks, each task runs in a series,
-    // but exits if any of the tasks error, each task has a callback
-    async.series([
-            // Get AwsAccountId and RdsArnPrefix
-            function(callback) {
-                iam.getUser({}, function(err, data) {
-                    var user,
-                        colon = new RegExp(":");
-                    if (err) {
-                        console.log(err, err.stack);
-                        callback(err, []);
-                    } else {
-                        user = data.User;
-                        AwsAccountId = user.Arn.split(colon)[4];
-                        RdsArnPrefix = 'arn:aws:rds:' + config.aws.Region + ':' + AwsAccountId + ':db:';
-                        callback(null, user);
-                    }
-                });
-            },
-
-            // Get All RdsInstances
-            function(callback) {
-                var i = 0;
-
-                rds.describeDBInstances({}).eachPage(function(err, page, done) {
-                    if (err) {
-                        callback(err, null);
-                    } else if (page) {
-                        if (page.DBInstances && page.DBInstances.length > 0) {
-                            async.mapLimit(page.DBInstances, 2, addTagsToDBInstances, function(err, results) {
-                                if (err) {
-                                    callback(err, null);
-                                } else {
-                                    filter.filter(results, function(err, matches) {
-                                        if (err) {
-                                            callback(err, null);
-                                        } else {
-                                            for (i = 0; i < matches.length; i += 1) {
-                                                dbInstances.push(matches[i]);
-                                            }
-                                            done();
-                                        }
-                                    });
-                                }
-                            });
-                        } else {
-                            done();
-                        }
-                    } else {
-                        callback(null, dbInstances);
-                    }
-                });
-            }
-        ],
-        function(err) {
-            functionCallback(err, dbInstances);
-        });
-}
-
-// filter to match on service instance id
-function DbInstanceIdFilter(id) {
-    this.filter = function(dbinstances, callback) {
-        function matchInstanceIdTag(tag, callback) {
-            callback(tag.Key === 'CF-AWS-RDS-INSTANCE-ID' && tag.Value === id);
-        }
-
-        function match(instance, callback) {
-            async.filter(instance.TagList, matchInstanceIdTag, function(resultingArray) {
-                callback(resultingArray.length > 0);
-            });
-        }
-
-        async.filter(dbinstances, match, function(matchingDbInstances) {
-            callback(null, matchingDbInstances);
-        });
-    };
-}
-
-
-// filter to select all of the  dbinstances
-function DbInstanceNoFilter() {
-    this.filter = function(dbinstances, callback) {
-
-        function match(instance, callback) {
-            var i, tag, serviceMatch = false,
-                planMatch = false,
-                orgMatch = false,
-                spaceMatch = false;
-
-            for (i = 0; i < instance.TagList.length; i += 1) {
-                tag = instance.TagList[i];
-                serviceMatch = serviceMatch || (tag.Key === 'CF-AWS-RDS-SERVICE-ID');
-                planMatch = planMatch || (tag.Key === 'CF-AWS-RDS-PLAN-ID');
-                orgMatch = orgMatch || (tag.Key === 'CF-AWS-RDS-ORG-ID');
-                spaceMatch = spaceMatch || (tag.Key === 'CF-AWS-RDS-SPACE-ID');
-            }
-            callback(serviceMatch && planMatch && orgMatch && spaceMatch);
-        }
-
-        async.filter(dbinstances, match, function(matchingDbInstances) {
-            callback(null, matchingDbInstances);
-        });
-    };
-}
-
-// filter to select all of dbinstances matching service, plan, organization and space.
-function DbInstanceParameterFilter(params) {
-    this.service_id = params.service_id;
-    this.plan_id = params.plan_id;
-    this.organization_guid = params.organization_guid;
-    this.space_guid = params.space_guid;
-
-    this.filter = function(dbinstances, callback) {
-
-        function match(instance, callback) {
-            var i, tag, serviceMatch = false,
-                planMatch = false,
-                orgMatch = false,
-                spaceMatch = false;
-
-            for (i = 0; i < instance.TagList.length; i += 1) {
-                tag = instance.TagList[i];
-                serviceMatch = serviceMatch || (tag.Key === 'CF-AWS-RDS-SERVICE-ID' && tag.Value === params.service_id);
-                planMatch = planMatch || (tag.Key === 'CF-AWS-RDS-PLAN-ID' && tag.Value === params.plan_id);
-                orgMatch = orgMatch || (tag.Key === 'CF-AWS-RDS-ORG-ID' && tag.Value === params.organization_guid);
-                spaceMatch = spaceMatch || (tag.Key === 'CF-AWS-RDS-SPACE-ID' && tag.Value === params.space_guid);
-            }
-            callback(serviceMatch && planMatch && orgMatch && spaceMatch);
-        }
-
-        async.filter(dbinstances, match, function(matchingDbInstances) {
-            callback(null, matchingDbInstances);
-        });
-    };
-}
-
 //generate an instance ID - TODO: Delete, instance ID is generated by caller, e.g. Cloud Foundry
 function generateInstanceId(prefix) {
     if (prefix!=null) {
@@ -605,6 +582,7 @@ var getCredentials = function getCredentials(instance, plan_id) {
 
 
 /**-------------------------------------------------------------------------
+ *
  * This checks to ensure that broker api version is specified and supported
  * 
  * @param version
@@ -628,12 +606,16 @@ function apiVersionChecker(version) {
 }
 
 
-/**
- *  Generates the configuration for the RDS instance based on client request
+/**--------------------------------------------------------------------
  *
- */
+ *  Generates the configuration for the RDS instance based on
+ *  client request
+ *
+ *--------------------------------------------------------------------*/
 function configureRDSRequest(request){
     //var plan = loadPlan(request.params.plan_id);
+    // Generate the new databases admin/root account and place into Vault
+    var creds = generateDBRootCredentials(request.params.id);
     var params = {
         Tags: [{
             'Key': 'CF-AWS-RDS-SERVICE-ID',
@@ -659,7 +641,7 @@ function configureRDSRequest(request){
                 'Key': 'Costcenter',
                 'Value': request.params.cost_center
             }],
-        StackName: "inst-" + request.params.id + "org-" + request.params.organization_guid + "space-" + request.params.space_guid,
+        StackName: "inst" + request.params.id + "-org" + request.params.organization_guid + "-space" + request.params.space_guid,
         Capabilities: ['CAPABILITY_IAM'],
         OnFailure: 'DELETE',
         Parameters: [{
@@ -668,11 +650,11 @@ function configureRDSRequest(request){
         },
             {
                 ParameterKey: 'DBUser',
-                ParameterValue: scommon.generatePassword(12)
+                ParameterValue: creds.userID
             },
             {
                 ParameterKey: 'DBPassword',
-                ParameterValue: scommon.generatePassword(12)
+                ParameterValue: creds.password
             }],
         //ResourceTypes: ['AWS::RDS'],
         TemplateBody: JSON.stringify(loadPlan(request.params.plan_id)),
@@ -681,23 +663,26 @@ function configureRDSRequest(request){
   return params;
 }
 
-/**
+/**--------------------------------------------------------------------
  *
  * TODO: Need to migrate to DB to support multiple brokers
  * TODO:Need cleanup mmechanism for instances that have been deleted
- */
+ *--------------------------------------------------------------------*/
 function updateStatus(instanceId,org_Id,space_Id,stackId,status) {
-    if (status=="deleting"){
-        instances.delete(instanceId);
+    if (status == "remove") {
+        delete instances[instanceId];
     }
     //check to see if it exists
     if (instanceId in instances) {
         //update its status
-        instances[instanceId] = status;
+        var attr = instances[instanceId];
+        attr.status = status;
+        instances[instanceId] = attr;
     } else {
         //else new stack, track its status
         var attributes = {org_Id,space_Id,stackId,status};
-        instances.set(instanceId, attributes);    //update status of using instance id and stackname
+        //update status of using instance id and stackname
+        instances[instanceId] = attributes;
     }
 }
 
@@ -723,38 +708,169 @@ function loadPlan(planId){
  *
  *------------------------------------------------------------------*/
 
-function createRDSFromFormation(request, response, next, plan){
+function createRDSFromFormation(request, response, next, plan, vaultClient) {
     var parameters = configureRDSRequest(request);
-    cloudFormation.createStack(parameters, function(err, data) {
-        if (err) {
+    cloudFormation.createStack(parameters, function (err, data) {
+        if (err != null) {
             //check to see if there is a stackId present
-            if(data!=null) {
+            if (data != null) {
                 updateStatus(request.id, request.params.organization_guid, request.params.space_guid, data.StackId, "failed");
             }
             console.log(err, err.stack); // an error occurred
+            if (data.statusCode == "400") {
+                response.send(409);
+            }
+            else {
+                response.send(501, data.message);
+            }
         }
         else {
             console.log(data);
-            updateStatus(request.id,request.params.organization_guid,request.params.space_guid,data.StackId,"in progress");
-            var params = {};
-            cloudFormation.waitFor('stackCreateComplete', params, function (err, data) {
-                if (err){
+            //data = {StackName: parameters.StackName};
+            //var polling = AsyncPolling(dbInstanceCreationComplete(data),30000).run();
+
+            //create the root account for the db instance in vault, we may have to delete later if the
+            //provisioning doesnt complete successfully
+            var dbInstanceAdminCredentials = {
+                userID: parameters.Parameters[1].ParameterValue,
+                password: parameters.Parameters[2].ParameterValue
+            };
+            createMySQLRootAccount(dbInstanceAdminCredentials, request.params.organization_guid, request.params.id, vaultClient);
+            updateStatus(request.params.id, request.params.organization_guid, request.params.space_guid, data.StackId, "in progress");
+            response.send(202, "Provisioning request successful");
+        }
+    });
+}
+/**
+ *
+ *  Mount new MySQL Secret Backend
+ *
+ *   1) Create new MySQL Mounts
+ *      for Vault, e.g. mysql-dev-<groupid>-<instanceId>
+ *   2) Configure connection to new instance
+ *   3) Create read and write roles
+ *
+ */
+function createMYSQLRootAccount(instanceCredentials, groupid, instanceID, vaultClient) {
+
+    if (!vaultClient.isAuthenticated()) {
+        authenticateViaAPPID(vaultClient);
+    }
+    //mount a new mysql secret backend
+    var mountPoint = process.env.VAULT_MYSQL_MOUNT_BASE + "-" + groupid + "-" + instanceID;
+    var path = process.env.VAULT_API_VERSION + process.env.VAULT_MOUNT_URL + mountPoint;
+    var options = {
+        type: "mysql",
+        description: "MySQL Mount for Group:" + groupid + " Instance:" + instanceID
+    };
+    vaultClient.configureRestifyClient();
+    vaultClient.restifyClient.put(path, options, function (err, req, res, obj) {
+        if (err != null) {
+            console.log(err, err.stack);
+        }
+        else {
+            //TODO:Determine different response codes
+            //configure the connection to the new instance mount point, the url will have to be updated
+            //once the RDS instance has been fully provisioned
+            path = process.env.VAULT_API_VERSION + mountPoint + process.env.VAULT_MYSQL_CONFIG_BASE;
+            options = {connection_url: instanceCredentials.userID + ":" + instanceCredentials.password + "@tcp"};
+            vaultClient.restifyClient.put(path, options, function (err, req, res, obj) {
+                if (err != null) {
                     console.log(err, err.stack);
-                    // an error occurred
-                    updateStatus(request.id,request.params.organization_guid,request.params.space_guid,data.StackId,"failed");
                 }
                 else {
-                    console.log(data);           // successful response
-                    updateStatus(request.id,request.params.organization_guid,request.params.space_guid,data.StackId,"succeeded");
+                    //TODO:Determine different response codes
+                    console.log('%j', obj);
+                    //create write and read roles for the new instance
                 }
-                next();
             });
+
+        }
+    });
+}
+/**function dbInstanceCreationComplete(req){
+    cloudFormation.describeStacks(req,function(err,data){
+        //some error encounter with provisioning, exit
+        if (err!=null) {
+            //check to see if there is a stackId present
+            if (data != null) {
+                updateStatus(request.id, request.params.organization_guid, request.params.space_guid, data.StackId, "failed");
+            }
+            console.log(err, err.stack); // an error occurred
+            if (data.statusCode == "400") {
+                response.send(409);
+            }
+            else{
+                response.send(501,data.message);
+            }
+            this.stop();
+        }
+        else {
+            //check status of the call to see if it is "CREATE_COMPLETE"
+            //create a new root account for the new instance
+            var status = data.Stacks[0].StackStatus;
+            if (status  == "CREATE_COMPLETE"){
+
+            }
+            //check to see if it stack creation failed itself
+            else{
+                switch(status) {
+                    case "CREATE_IN_PROGRESS":
+                        break;
+                    case "CREATE_FAILED":
+                        this.stop();
+                        break;
+                    case "CREATE_COMPLETE":
+                        var dbInstanceAdminCredentials = {
+                            userID: parameters.parameters['DBUser'],
+                            password: parameters.parameters['DBPassword']
+                        };
+                        createMySQLRootAccount(dbInstanceAdminCredentials, request.params.organization_guid, request.params.id, vaultClient);
+                        this.stop();
+                        break;
+                    case "DELETE_IN_PROGRESS":
+                        this.stop();
+                        break;
+                    case "DELETE_FAILED":
+                        this.stop();
+                        break;
+                    case "DELETE_COMPLETE":
+                        this.stop();
+                        break;
+                    default:
+                        this.stop();
+                }
+            }
+        }
+    });
+}*/
+
+/**-------------------------------------------------------------------------
+ * Broker uses basic authentication to ensure the API requestor is known
+ * These credentials are generated when pushing broker, are encrypted and
+ * stored in Cloud Controller database and passed from Cloud Controller
+ * to broker during API invocation
+ *
+ * @param credentials
+ * @returns {Function}
+ --------------------------------------------------------------------------*/
+
+function authenticateBrokerCaller(credentials) {
+    return function (request, response, next) {
+        if (credentials.authUser || credentials.authPassword) {
+            if (!(request.authorization && request.authorization.basic && request.authorization.basic.username === credentials.authUser && request.authorization.basic.password === credentials.authPassword)) {
+                response.status(401);
+                response.setHeader('WWW-Authenticate', 'Basic "realm"="' + server.name + '"');
+                next(new restify.InvalidCredentialsError("invalid username or password"));
+            } else {
+                // authenticated!
+            }
+        } else {
+            // no authentication required.
         }
         next();
-    });
-    next();
+    };
 }
-
 /**--------------------------------------------------------------------
  *
  * The following are required to provision new instances of RDS:
@@ -810,24 +926,6 @@ server.on('uncaughtException', function(req, res, route, err) {
     });
 });
 
-//TODO: Move to security common
-function authenticate(credentials) {
-    return function(request, response, next) {
-        if (credentials.authUser || credentials.authPassword) {
-            if (!(request.authorization && request.authorization.basic && request.authorization.basic.username === credentials.authUser && request.authorization.basic.password === credentials.authPassword)) {
-                response.status(401);
-                response.setHeader('WWW-Authenticate', 'Basic "realm"="' + server.name + '"');
-                next(new restify.InvalidCredentialsError("invalid username or password"));
-            } else {
-                // authenticated!
-            }
-        } else {
-            // no authentication required.
-        }
-        next();
-    };
-};
-
 //checkConsistency();
 urlTemplates = compileTemplates();
 
@@ -835,3 +933,35 @@ var port = Number(process.env.VCAP_APP_PORT || 5001);
 server.listen(port, function() {
     console.log('%s listening at %s', server.name, server.url)
 });
+
+function authenticateViaAPPID(vaultClient) {
+    var vaultPath = process.env.VAULT_API_VERSION + process.env.VAULT_APPID_PATH + process.env.VAULT_APPID;
+    var payload = {user_id: process.env.VAULT_USERID};
+    vaultClient.restifyClient.post(vaultPath, payload, function (err, req, res, obj) {
+        if (err != null) {
+            console.log(err, err.stack);
+        }
+        else {
+            //save the vault client token that can be used for all subsequent requests
+            vaultClient.clientToken = obj.auth.client_token;
+            console.log() = obj.auth.client_token;
+        }
+    });
+}
+/**
+ *  TODO: Need to arrive at a password generation mechanism
+ *  This will be used by both original provisioning for generating root account as well as for bind/re-bind.
+ *  The resulting credential will be stored in vault
+ *
+ */
+function generateDBRootCredentials(instanceID) {
+    var creds = {
+        userID: "",
+        password: ""
+    };
+    creds.userID = "brokered" + instanceID;
+    creds.password = generatePassword(24, false, /[\d]/);
+    return creds;
+}
+
+
