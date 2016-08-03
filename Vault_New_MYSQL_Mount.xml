@@ -1,0 +1,45 @@
+<RestClientRequest>
+  <option name="biscuits">
+    <list />
+  </option>
+  <option name="httpMethod" value="POST" />
+  <option name="urlBase" value="http://52.41.9.191:8200" />
+  <option name="urlPath" value="/v1/auth/app-id/login/cfd2-rds-broker" />
+  <option name="headers">
+    <list>
+      <KeyValuePair>
+        <option name="key" value="Accept" />
+        <option name="value" value="*/*" />
+      </KeyValuePair>
+      <KeyValuePair>
+        <option name="key" value="Cache-Control" />
+        <option name="value" value="no-cache" />
+      </KeyValuePair>
+      <KeyValuePair>
+        <option name="key" value="x-broker-api-version" />
+        <option name="value" value="2.8" />
+      </KeyValuePair>
+      <KeyValuePair>
+        <option name="key" value="X" />
+        <option name="value" value="PUT" />
+      </KeyValuePair>
+      <KeyValuePair>
+        <option name="key" value="Content-Type" />
+        <option name="value" value="application/json" />
+      </KeyValuePair>
+      <KeyValuePair>
+        <option name="key" value="X-Vault-Token" />
+        <option name="value" value="715f7404-a7c1-3ad6-0c60-bc0210b5d65b" />
+      </KeyValuePair>
+    </list>
+  </option>
+  <option name="parameters">
+    <list />
+  </option>
+  <option name="parametersEnabled" value="true" />
+  <option name="haveTextToSend" value="true" />
+  <option name="haveFileToSend" value="false" />
+  <option name="isFileUpload" value="false" />
+  <option name="textToSend" value="{   &quot;user_id&quot;:&quot;cloud-controller-cfd2&quot; }" />
+  <option name="filesToSend" value="" />
+</RestClientRequest>
