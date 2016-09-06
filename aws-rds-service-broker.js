@@ -32,44 +32,27 @@
 
 'use strict';
 
-/**
- * Declare All Dependencies
- */
-class VaultClient {
-    constructor() {
-        this.clientToken = "";
-        this.restifyClient = null;
-    }
-
-    isAuthenticated() {
-        if (this.clientToken == "") {
-            return false;
-        }
-        return true;
-    }
-
-    configureRestifyClient() {
-        var options = {
-            url: process.env.VAULT_ADDR,
-            //headers: {
-            //        'X-VAULT-TOKEN':this.clientToken
-            //}
-        };
-        this.restifyClient = restify.createJSONClient(options);
-    }
-}
 var config = require('./config/aws-rds-service-broker');
+
 //TODO: Replace with DB like Redis/MariaDB in order to support mutiple brokers
 var instances = {};
+
+
 var generatePassword = require('password-generator');
-var assert = require('assert');
+
+//handles REST endpoint
 var restify = require('restify');
-var async = require('async');
 var Handlebars = require('handlebars');
+
+//aws api
 var aws = require('aws-sdk');
-var AsyncPolling = require('async-polling');
-//var Vaulted = require('vaulted');
+aws.config.setPromisesDependency(require('bluebird'));
+
+//used for creating outbound REST calls
 var axios = require('axios');
+
+//used for string manipulation
+var S = require('string');
 
 /* following configs are determined by environment variables */
 config.credentials = {};
@@ -256,40 +239,16 @@ server.put('/v2/service_instances/:instance_id/last_operation', function(request
  ---------------------------------------------------------------------------------------------------------------------*/
 server.put('/v2/service_instances/:id', function(request, response, next) {
     var msg = validateProvisioningRequest(request);
-    var vaultClient = new VaultClient();
-    vaultClient.configureRestifyClient();
-
-    /**testing vaulted client
-     var myVault = new Vaulted({
-        vault_host: 'http://52.41.9.191',
-            vault_port: 8200,
-            vault_ssl: false
-    });
-
-     myVault.setToken(process.env.VAULT_TOKEN);
-     var status = {sealed:false};
-     myVault.setStatus(status);
-
-     myVault.prepare()
-     .then(function () {
-            console.log('Vault is now ready!');
-        });
-     myVault.createAuthMount('app-id');
-
-     var options = {user_id:'cloud-controller-cfd2',
-                   app_id:'cfd2-rds-broker'};
-     var loginPromise = myVault.appLogin(options,'app-id');*/
-    var vaultAxiosClient = axios.create({
-        baseURL: process.env.VAULT_ADDR
-
-    });
-
     if(msg!=""){
         response.send(422,msg);
         next();
     }
     else {
-        createRDSFromFormation(request, response, next, config.plans[request.params.plan_id], vaultClient);
+        var vaultAxiosClient = axios.create({
+            baseURL: process.env.VAULT_ADDR
+        });
+        vaultAxiosClient.defaults.headers.post['Content-Type'] = 'application/json';
+        createRDSFromFormation(request, response, next, config.plans[request.params.plan_id], vaultAxiosClient);
     }
 });
 
@@ -710,36 +669,48 @@ function loadPlan(planId){
 
 function createRDSFromFormation(request, response, next, plan, vaultClient) {
     var parameters = configureRDSRequest(request);
-    cloudFormation.createStack(parameters, function (err, data) {
-        if (err != null) {
+    var createStackPromise = cloudFormation.createStack(parameters).promise();
+
+
+    /*--------------------------------------------------------
+     * 1.  Create the stack which includes RDS resource
+     *-------------------------------------------------------*/
+    createStackPromise.then(function (data) {
+        console.log(data);
+        updateStatus(request.params.id, request.params.organization_guid, request.params.space_guid, data.StackId, "in progress");
+
+        /*---------------------------------------------------------------
+         * 2. Set up a wait for the provisioning completion, stack has been
+         * created, wait for the RDS completion notification
+         *--------------------------------------------------------------*/
+        var opts = {StackName: data.StackId};
+        cloudFormation.waitFor('stackCreateComplete', opts).promise().then(function (data) {
+            console.log(data);
+
+            //create the mysql credentials, etc for new instance
+            configureVaultMySQL(parameters, request.params.organization_guid, request.params.id, vaultClient, data);
+
+            //update the provisioning request
+            updateStatus(request.params.id, request.params.organization_guid, request.params.space_guid, data.StackId, "succeeded");
+
+        });
+
+
+        response.send(202, "Provisioning request successful");
+    })
+        .catch(function (error, data) {
+            console.log(error, error.stack); // an error occurred
             //check to see if there is a stackId present
             if (data != null) {
                 updateStatus(request.id, request.params.organization_guid, request.params.space_guid, data.StackId, "failed");
+                if (data.statusCode == "400") {
+                    response.send(409);
+                }
+                else {
+                    response.send(501, data.message);
+                }
             }
-            console.log(err, err.stack); // an error occurred
-            if (data.statusCode == "400") {
-                response.send(409);
-            }
-            else {
-                response.send(501, data.message);
-            }
-        }
-        else {
-            console.log(data);
-            //data = {StackName: parameters.StackName};
-            //var polling = AsyncPolling(dbInstanceCreationComplete(data),30000).run();
-
-            //create the root account for the db instance in vault, we may have to delete later if the
-            //provisioning doesnt complete successfully
-            var dbInstanceAdminCredentials = {
-                userID: parameters.Parameters[1].ParameterValue,
-                password: parameters.Parameters[2].ParameterValue
-            };
-            createMySQLRootAccount(dbInstanceAdminCredentials, request.params.organization_guid, request.params.id, vaultClient);
-            updateStatus(request.params.id, request.params.organization_guid, request.params.space_guid, data.StackId, "in progress");
-            response.send(202, "Provisioning request successful");
-        }
-    });
+        });
 }
 /**
  *
@@ -751,99 +722,73 @@ function createRDSFromFormation(request, response, next, plan, vaultClient) {
  *   3) Create read and write roles
  *
  */
-function createMYSQLRootAccount(instanceCredentials, groupid, instanceID, vaultClient) {
+function configureVaultMySQL(awsParameters, groupid, instanceID, vaultClient, stackData) {
 
-    if (!vaultClient.isAuthenticated()) {
-        authenticateViaAPPID(vaultClient);
-    }
-    //mount a new mysql secret backend
-    var mountPoint = process.env.VAULT_MYSQL_MOUNT_BASE + "-" + groupid + "-" + instanceID;
-    var path = process.env.VAULT_API_VERSION + process.env.VAULT_MOUNT_URL + mountPoint;
-    var options = {
-        type: "mysql",
-        description: "MySQL Mount for Group:" + groupid + " Instance:" + instanceID
-    };
-    vaultClient.configureRestifyClient();
-    vaultClient.restifyClient.put(path, options, function (err, req, res, obj) {
-        if (err != null) {
-            console.log(err, err.stack);
-        }
-        else {
-            //TODO:Determine different response codes
-            //configure the connection to the new instance mount point, the url will have to be updated
-            //once the RDS instance has been fully provisioned
-            path = process.env.VAULT_API_VERSION + mountPoint + process.env.VAULT_MYSQL_CONFIG_BASE;
-            options = {connection_url: instanceCredentials.userID + ":" + instanceCredentials.password + "@tcp"};
-            vaultClient.restifyClient.put(path, options, function (err, req, res, obj) {
-                if (err != null) {
-                    console.log(err, err.stack);
-                }
-                else {
-                    //TODO:Determine different response codes
-                    console.log('%j', obj);
-                    //create write and read roles for the new instance
-                }
-            });
+    /*----------------------------------------------------
+     * 1.  Authenticate to Vault and get new client token
+     *---------------------------------------------------*/
+    var vaultPath = process.env.VAULT_API_VERSION + process.env.VAULT_APPID_PATH + process.env.VAULT_APPID;
+    var payload = {user_id: process.env.VAULT_USERID};
+    vaultClient.post(vaultPath, {
+        user_id: process.env.VAULT_USERID
+    })
+        .then(function (response) {
+            /*---------------------------------------------------------------------------------
+             * 2. Successful authentication create new mount point for newly created instance
+             *--------------------------------------------------------------------------------*/
+            console.log(response);
+            vaultClient.defaults.headers.common['X-Vault-Token'] = response.data.auth.client_token;
 
-        }
-    });
+            var mountPoint = process.env.VAULT_MYSQL_MOUNT_BASE + "-" + process.env.BROKER_ENV + "-" + groupid + "-" + instanceID;
+            var path = process.env.VAULT_API_VERSION + process.env.VAULT_MOUNT_URL + mountPoint;
+            var options = {
+                type: "mysql",
+                description: "MySQL Mount for Group:" + groupid + " Instance:" + instanceID
+            };
+
+            vaultClient.post(path, options)
+                .then(function (response) {
+                    console.log(response);
+                    /*---------------------------------------------------------------------------
+                     * 3. Create new connection configuration for new mount created in step #2.
+                     *    The connection url comes from the response from AWS upon stack creation
+                     *    completion
+                     * --------------------------------------------------------------------------*/
+
+                    //get the root credentials for the new instance
+                    var dbInstanceCredentials = {
+                        userID: awsParameters.Parameters[1].ParameterValue,
+                        password: awsParameters.Parameters[2].ParameterValue
+                    };
+
+                    //get the hostname of the new RDS instance
+                    var dbURL = S(stackData.Stacks[0].Outputs[0].OutputValue).chompLeft('jdbc:mysql://');
+
+                    path = process.env.VAULT_API_VERSION + mountPoint + process.env.VAULT_MYSQL_CONFIG_BASE;
+                    options = {
+                        connection_url: dbInstanceCredentials.userID + ":" + dbInstanceCredentials.password + "@tcp(" + dbURL + ")",
+                        verify_connection: true
+                    };
+                    vaultClient.post(path, options)
+                        .then(function (response) {
+                            console.log(response);
+                            /*-----------------------------------------------------
+                             * 4. Create new read and write roles for new database
+                             * ----------------------------------------------------*/
+
+
+                        });
+                })
+                .catch(function (error) {
+                    //TODO: What to do upon failure of the mount?
+                    console.log(error);
+                });
+        })
+        .catch(function (error) {
+            //TODO: What to do upon failure of the authentication?
+            console.log(error);
+        });
 }
-/**function dbInstanceCreationComplete(req){
-    cloudFormation.describeStacks(req,function(err,data){
-        //some error encounter with provisioning, exit
-        if (err!=null) {
-            //check to see if there is a stackId present
-            if (data != null) {
-                updateStatus(request.id, request.params.organization_guid, request.params.space_guid, data.StackId, "failed");
-            }
-            console.log(err, err.stack); // an error occurred
-            if (data.statusCode == "400") {
-                response.send(409);
-            }
-            else{
-                response.send(501,data.message);
-            }
-            this.stop();
-        }
-        else {
-            //check status of the call to see if it is "CREATE_COMPLETE"
-            //create a new root account for the new instance
-            var status = data.Stacks[0].StackStatus;
-            if (status  == "CREATE_COMPLETE"){
-
-            }
-            //check to see if it stack creation failed itself
-            else{
-                switch(status) {
-                    case "CREATE_IN_PROGRESS":
-                        break;
-                    case "CREATE_FAILED":
-                        this.stop();
-                        break;
-                    case "CREATE_COMPLETE":
-                        var dbInstanceAdminCredentials = {
-                            userID: parameters.parameters['DBUser'],
-                            password: parameters.parameters['DBPassword']
-                        };
-                        createMySQLRootAccount(dbInstanceAdminCredentials, request.params.organization_guid, request.params.id, vaultClient);
-                        this.stop();
-                        break;
-                    case "DELETE_IN_PROGRESS":
-                        this.stop();
-                        break;
-                    case "DELETE_FAILED":
-                        this.stop();
-                        break;
-                    case "DELETE_COMPLETE":
-                        this.stop();
-                        break;
-                    default:
-                        this.stop();
-                }
-            }
-        }
-    });
-}*/
 
 /**-------------------------------------------------------------------------
  * Broker uses basic authentication to ensure the API requestor is known
@@ -871,6 +816,7 @@ function authenticateBrokerCaller(credentials) {
         next();
     };
 }
+
 /**--------------------------------------------------------------------
  *
  * The following are required to provision new instances of RDS:
@@ -937,16 +883,17 @@ server.listen(port, function() {
 function authenticateViaAPPID(vaultClient) {
     var vaultPath = process.env.VAULT_API_VERSION + process.env.VAULT_APPID_PATH + process.env.VAULT_APPID;
     var payload = {user_id: process.env.VAULT_USERID};
-    vaultClient.restifyClient.post(vaultPath, payload, function (err, req, res, obj) {
-        if (err != null) {
-            console.log(err, err.stack);
-        }
-        else {
-            //save the vault client token that can be used for all subsequent requests
-            vaultClient.clientToken = obj.auth.client_token;
-            console.log() = obj.auth.client_token;
-        }
-    });
+    vaultClient.post(vaultPath, {
+        user_id: process.env.VAULT_USERID
+    })
+        .then(function (response) {
+            //if successful add the Vault Token to list of headers for subsequent calls
+            console.log(response);
+            vaultClient.defaults.headers.common['X-Vault-Token'] = response.data.auth.client_token;
+        })
+        .catch(function (error) {
+            console.log(error);
+        });
 }
 /**
  *  TODO: Need to arrive at a password generation mechanism

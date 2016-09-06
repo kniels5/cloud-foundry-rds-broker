@@ -8,17 +8,15 @@
     "start": "node aws-rds-service-broker.js"
   },
   "dependencies": {
-    "aws-sdk" : "2.1.6",
+    "aws-sdk": "2.4.12" ,
     "async" : "^0.6.2",
     "handlebars" : "2.0.0",
     "restify": "4.1.1" ,
     "vault-client": "0.1.0" ,
     "consul": "0.25.0" ,
-    "vaulted": "3.1.0" ,
-    "node-vault": "0.5.1" ,
     "password-generator": "2.0.2" ,
-    "async-polling": "0.2.1" ,
-    "assert": "1.4.1" ,
-    "axios": "0.13.1"
+    "axios": "0.13.1" ,
+    "bluebird": "3.4.1" ,
+    "string": "3.3.1"
   }
 }
