@@ -194,6 +194,10 @@
       "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}",
       "formation_name": "plan1-mariadb_v1.json"
     },
+    "GK974401-BB86-446E-975C-9BDA0B93D444": {
+      "urlTemplate": "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}" ,
+      "formation_name": "plan1-mariadb_v2.json"
+    } ,
     "D4AA6ECE-C79A-43E7-B04B-3B9B7F9F7790": {
       "urlTemplate" :  "mysql://{{username}}:{{password}}@{{host}}:{{port}}/{{name}}",
       "formation_name": "plan2a-mariadb_v1.json"

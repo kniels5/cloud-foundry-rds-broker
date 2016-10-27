@@ -34,8 +34,21 @@
 
 var config = require('./config/aws-rds-service-broker');
 
-//TODO: Replace with DB like Redis/MariaDB in order to support mutiple brokers
-var instances = {};
+//TODO: Replace with DB like Redis/MariaDB in order to support multiple brokers
+function binding(bindId, leaseId) {
+    this.bindId = bindId;
+    this.leaseId = leaseId;
+}
+function dbInstance(binding, orgId, spaceId, stackId, status, dbURL) {
+    this.binding = binding;
+    this.orgId = orgId;
+    this.spaceId = spaceId;
+    this.stackId = stackId;
+    this.status = status;
+    this.dbURL = dbURL;
+}
+
+var instances = new Map();
 
 
 var generatePassword = require('password-generator');
@@ -51,8 +64,12 @@ aws.config.setPromisesDependency(require('bluebird'));
 //used for creating outbound REST calls
 var axios = require('axios');
 
-//used for string manipulation
+//used for string & final manipulation
 var S = require('string');
+var fs = require('read-file');
+var readRoleTemplate = "CREATE USER '{{name}}'@'%' IDENTIFIED BY '{{password}}';GRANT SELECT ON <dbname>.* TO '{{name}}'@'%';";
+var writeRoleTemplate = "CREATE USER '{{name}}'@'%' IDENTIFIED BY '{{password}}';GRANT ALTER,CREATE,INDEX,INSERT,SELECT,UPDATE ON <dbname>.* TO '{{name}}'@'%';";
+
 
 /* following configs are determined by environment variables */
 config.credentials = {};
@@ -131,13 +148,6 @@ server.get('/v2/catalog', function(request, response, next) {
     next();
 });
 
-function composeResponse(instanceId, status, response, data) {
-    var returnMsg;
-    updateStatus(instanceId, null, null, null, status);
-    returnMsg = {state: status};
-    //returnMsg.description= data.Message;
-    response.send(200, returnMsg);
-}
 /**---------------------------------------------------------------------------
  *
  * Determine the return status from the AWS Describe Stacks Call:
@@ -148,38 +158,46 @@ function composeResponse(instanceId, status, response, data) {
 
 function determineAWSReturnStatus(instanceId, data, response) {
     var status = data.Stacks[0].StackStatus;
-
+    var returnState;
     switch (status) {
         case "CREATE_IN_PROGRESS":
-            composeResponse(instanceId, "in progress", response, data);
+            returnState = "in progress";
+            instances.get(instanceId).status = "in progress";
             break;
         case "CREATE_FAILED":
-            composeResponse(instanceId, "failed", response, data);
+            returnState = "failed";
+            instances.get(instanceId).status = "failed";
             break;
         case "CREATE_COMPLETE":
-            composeResponse(instanceId, "succeeded", response, data);
+            returnState = "succeeded";
+            instances.get(instanceId).status = "succeeded";
             break;
         case "DELETE_IN_PROGRESS":
-            composeResponse(instanceId, "in progress", response, data);
+            returnState = "in progress";
+            instances.get(instanceId).status = "in progress";
             break;
         case "DELETE_FAILED":
             //want to try multiple times to delete to avoid orphans
-            if (instances[instanceId].state == "in progress") {
+            if (instances.has(instanceId) & instances.get(instance).state == "in progress") {
                 //first attempt at deleting, force cloud controller to try again
-                updateStatus(instanceId, null, null, null, "deleting");
-                var returnMsg = {state: "in progress"};
-                response.send(200, returnMsg);
+                instances.get(instanceId).status = "deleting";
+                returnState = "in progress";
             }
             else {
-                composeResponse(instanceId, "failed", response, data);
+                returnState = "failed";
+                instances.get(instanceId).status = "failed";
             }
             break;
         case "DELETE_COMPLETE":
-            composeResponse(instanceId, "succeeded", response, data);
+            returnState = "succeeded";
+            instances.get(instanceId).status = "succeeded";
             break;
         default:
-            composeResponse(instanceId, "failed", response, data);
+            instances.get(instanceId).status = "succeeded";
+            returnState = "succeeded";
     }
+    var returnMsg = {state: returnState};
+    response.send(200, returnMsg);
 }
 
 /**---------------------------------------------------------------------------------------------------------------------
@@ -193,19 +211,18 @@ function determineAWSReturnStatus(instanceId, data, response) {
  * See http://docs.cloudfoundry.org/services/api.html for more info
  *
  ---------------------------------------------------------------------------------------------------------------------*/
-server.put('/v2/service_instances/:instance_id/last_operation', function(request, response, next) {
+server.put('/v2/service_instances/:instance_id/last_operation', function (request, response) {
     if (!request.params.hasOwnProperty("instance_id")) {
         response.send(500, "The instance was not specified");
         next();
     }
-    else if (!(request.params.instance_id in instances)) {
+    else if (!instances.has(request.params.instance_id)) {
         //if not found assume it was deleted successfully
         //cloud controller not expecting a response body
         response.send(410);
-        next();
     }
     else {
-        var stackName = instances[request.params.instance_id].stackId;
+        var stackName = instances.get(request.params.instance_id).stackId;
         var params = {StackName: stackName};
 
         cloudFormation.describeStacks(params, function (err, data) {
@@ -221,7 +238,6 @@ server.put('/v2/service_instances/:instance_id/last_operation', function(request
                 determineAWSReturnStatus(request.params.instance_id, data, response);
             }
         });
-        next();
     }
 });
 /**---------------------------------------------------------------------------------------------------------------------
@@ -275,14 +291,13 @@ server.del('/v2/service_instances/:instance_id', function (request, response) {
             description: "This service plan requires client support for asynchronous service operations."
         };
         response.send(422, msg);
-        return;
     }
 
     //must specify the instance to delete, this should never happen with Cloud Controller making requests
     if (!request.params.hasOwnProperty("instance_id")) {
         response.send(500, "The instance was not specified");
     }
-    else if (!(request.params.instance_id in instances)) {
+    else if (!instances.has(request.params.instance_id)) {
         //if not found assume it was deleted successfully
         //cloud controller not expecting a response body
         response.send(410);
@@ -292,30 +307,30 @@ server.del('/v2/service_instances/:instance_id', function (request, response) {
         //this should only ever be executed once, since deletes are async, "last_operation" would be subsequently
         //called so some of this logic could be removed since cloud controller shouldnt call delete twice for same
         //instance
-        var stackName = instances[request.params.instance_id].stackId;
-        var status = instances[request.params.instance_id].status;
+        var stackName = instances.get(request.params.instance_id).stackId;
+        var status = instances.get(request.params.instance_id).status;
         var params = {StackName: stackName};
-        cloudFormation.deleteStack(params, function (err, data) {
+        var deleteStackPromise = cloudFormation.deleteStack(parameters).promise();
+        deleteStackPromise.then(function (data) {
+            // successful response - mark the status as "deleting"
+            console.log(data);
+            instances.get(request.params.instance_id).status = "deleting";
+            response.send(202);
+
+        })
+            .catch(function (error) {
             //error deleting, assume that the stack doesnt exist
-            if (err != null) {
-                console.log(err, err.stack);
+                console.log(error);
                 // an error occurred - if the previous status is "deleting" remove the instance
                 if (status == "deleting") {
-                    updateStatus(request.params.instance_id, null, null, "remove");
+                    instances.delete(request.params.instance_id);
                     response.send(200);
                 }
                 else {
                     //wasn't previously "deleting" so update to deleting and force cloud controller to try again
-                    updateStatus(request.params.instance_id, null, null, "deleting");
+                    instances.get(request.params.instance_id).status = "deleting";
                     response.send(202);
                 }
-            }
-            else {
-                // successful response - mark the status as "deleting"
-                console.log(data);
-                updateStatus(request.params.instance_id, null, null, "deleting");
-                response.send(202);
-            }
         });
     }
 });
@@ -327,37 +342,8 @@ server.del('/v2/service_instances/:instance_id', function (request, response) {
  *     See http://docs.cloudfoundry.org/services/api.html for more info
  *
  ---------------------------------------------------------------------------------------------------------------------*/
-server.get('/v2/service_instances', function(request, response, next) {
-    getAllDbInstances(new DbInstanceNoFilter(), function(err, allDatabaseInstances) {
-        if (!err) {
-            async.map(allDatabaseInstances, function(instance, callback) {
-                    var result = {};
-                    result.id = getInstanceId(instance);
-                    result.service_id = getServiceId(instance);
-                    result.plan_id = getPlanId(instance);
-                    result.organization_guid = getOrgId(instance);
-                    result.space_guid = getSpaceId(instance);
-                    result.db_instance_id = instance.DBInstanceIdentifier;
-                    if (instance && instance.Endpoint) {
-                        result.credentials = getCredentials(instance, result.plan_id);
-                    }
-
-                    callback(null, result);
-                },
-                function(err, result) {
-                    if (err) {
-                        response.send(500, {
-                            'description': err
-                        });
-                    } else {
-                        response.send(result);
-                    }
-                });
-        } else {
-            response.send(500, err);
-        }
-        next();
-    });
+server.get('/v2/service_instances', function (request, response) {
+    response.send(500, "Unsupported function");
 });
 
 //---------------------------------------end of /v2/service_instances API-----------------------------------------------
@@ -380,73 +366,53 @@ server.get('/v2/service_instances', function(request, response, next) {
  *          1) Ensure instance id exists
  *          2) Check bind id and do the following:
  *              a) If bind id is non-unique, generate new set of credentials, i.e. rebind
- *              b) If bind id is unique, generate new set of credentials, i.e. bind
+ *              b) If bind id is unique, generate new set of credentials
+ *              c) Response will include the following
+ *                  --> uri (jdbc:mysql://<hostname>:<port>/<dbname>
+ *                  --> hostname
+ *                  --> port
+ *                  --> username
+ *                  --> password
  *          3) Tag RDS instance with bind id
  *          4) Tag vault credentials with bind id
  *
  ---------------------------------------------------------------------------------------------------------------------*/
-server.put('/v2/service_instances/:instance_id/service_bindings/:binding_id', function(req, response, next) {
+server.put('/v2/service_instances/:instance_id/service_bindings/:binding_id', function (req, response) {
     var reply = {};
+    var instanceID = request.params.instance_id;
+    var bindID = request.params.binding_id;
 
-    getAllDbInstances(new DbInstanceIdFilter(req.params.instance_id), function(err, allDatabaseInstances) {
-        var i = 0,
-            instance = null,
-            tag = null;
-
-        if (!err) {
-            if (allDatabaseInstances && allDatabaseInstances.length > 0) {
-                instance = allDatabaseInstances[0];
-                if (instance && instance.Endpoint) {
-                    //TODO: Credentials on a bind needs to be generated, stored in vault
-                    reply.credentials = getCredentials(instance, getPlanId(instance));
-                    response.send(reply);
-                } else {
-                    response.send(503, {
-                        'description': "No endpoint set on the instance '" + instance.DBInstanceIdentifier + "'. The instance is in state '" + instance.DBInstanceStatus + "'. please retry a few minutes later"
-                    });
-                }
-            } else {
-                response.send(500, {
-                    'description': 'database instance has been deleted.'
-                });
-            }
-        } else {
-            response.send(500, {
-                'description': err
-            });
-        }
-        next();
+    //must specify the instance to delete, this should never happen with Cloud Controller making requests
+    if (instanceID != null) {
+        response.send(422, "The instance was not specified");
+    }
+    else if (!instances.has(instanceID)) {
+        //instance doesnt exist
+        response.send(422, "The instance you are attempting to bind to doesnt exist");
+    }
+    else if (bindID == null) {
+        response.send(422, "No binding id specified");
+    }
+    var vaultAxiosClient = axios.create({
+        baseURL: process.env.VAULT_ADDR
     });
+    vaultAxiosClient.defaults.headers.post['Content-Type'] = 'application/json';
+
+    //200/409 - Binding already exists, none generated
+    var instanceBindID = instances.get(request.params.instance_id).bindId;
+    if (instanceBindID != null && instanceBindID = bindID) {
+        //binding already exists
+        response.send(200, " Binding already exists");
+    }
+    else {
+        //binding doesnt exists create it - 201
+        var path = process.env.VAULT_API_VERSION +;
+        var
+            };
+
 });
 
-//-----------------------end of /v2/service_instances/:instance_id/service_bindings/:binding_id------------------------- 
-
-/**---------------------------------------------------------------------------------------------------------------------
- * Map broker api /v2/service_instances/<instance id> /service_bindings/<bind id> to unbind application from existing
- * service. AWS de-provisioning will be asynchronous but credential deletion from Vault will be synchronous
- *              1) Service ID (optional) - this uniquely identifies the service in Cloud Foundry, e.g. MariaDB. URL
- *              2) Instance ID - this uniquely identifies the instance of the service, this ID is generated by the
- *                               Cloud Controller. URL
- *              3) Plan ID (optional) - this uniquely identifies the attributes of the instance,
- *                                      e.g. physical resources, iiops,etc. URL
- *              4) Bind ID - this is an id that is generated by the Cloud Controller, it must be tracked such that an
- *                           unbind correctly deletes credentials associated with a given service. URL
- *
- *     See http://docs.cloudfoundry.org/services/api.html for more info
- *
- *  TODO: Change credential management to vault, flow should be:
- *          1) Ensure instance id exists
- *          2) Check bind id and do the following:
- *              a) If bind id is non-unique, generate new set of credentials, i.e. rebind
- *              b) If bind id is unique, generate new set of credentials, i.e. bind
- *          3) Tag RDS instance with bind id
- *          4) Tag vault credentials with bind id
- *
- ---------------------------------------------------------------------------------------------------------------------*/
-server.del('/v2/service_instances/:instance_id/service_bindings/:id', function(req, response, next) {
-    response.send({});
-    next();
-});
+//-----------------------end of /v2/service_instances/:instance_id/service_bindings/:binding_id-------------------------
 
 //-------------------------------end /v2/service_instances/:instance_id/service_bindings/:id----------------------------
 
@@ -622,29 +588,6 @@ function configureRDSRequest(request){
   return params;
 }
 
-/**--------------------------------------------------------------------
- *
- * TODO: Need to migrate to DB to support multiple brokers
- * TODO:Need cleanup mmechanism for instances that have been deleted
- *--------------------------------------------------------------------*/
-function updateStatus(instanceId,org_Id,space_Id,stackId,status) {
-    if (status == "remove") {
-        delete instances[instanceId];
-    }
-    //check to see if it exists
-    if (instanceId in instances) {
-        //update its status
-        var attr = instances[instanceId];
-        attr.status = status;
-        instances[instanceId] = attr;
-    } else {
-        //else new stack, track its status
-        var attributes = {org_Id,space_Id,stackId,status};
-        //update status of using instance id and stackname
-        instances[instanceId] = attributes;
-    }
-}
-
 /**-----------------------------------------------------------------
  *
  * Load the appropriate cloud formation based on the plan id
@@ -677,7 +620,10 @@ function createRDSFromFormation(request, response, next, plan, vaultClient) {
      *-------------------------------------------------------*/
     createStackPromise.then(function (data) {
         console.log(data);
-        updateStatus(request.params.id, request.params.organization_guid, request.params.space_guid, data.StackId, "in progress");
+        //binding(bindId,leaseId),orgId,spaceId,stackId,status,dbURL;
+        var dbInstance = new dbInstance(new binding(null, null), request.params.organization_guid, request.params.space_guid, data.StackId, "in progress"
+            , null);
+        instances.put(request.params.id, dbInstance);
 
         /*---------------------------------------------------------------
          * 2. Set up a wait for the provisioning completion, stack has been
@@ -690,8 +636,11 @@ function createRDSFromFormation(request, response, next, plan, vaultClient) {
             //create the mysql credentials, etc for new instance
             configureVaultMySQL(parameters, request.params.organization_guid, request.params.id, vaultClient, data);
 
-            //update the provisioning request
-            updateStatus(request.params.id, request.params.organization_guid, request.params.space_guid, data.StackId, "succeeded");
+            //store the returned jdbc url
+            var jdbcURLTemplate = S(stackData.Stacks[0].Outputs[0].OutputValue);
+            dbInstance = instances.get(request.params.id);
+            dbInstance.dbURL = jdbcURLTemplate;
+            dbInstance.status = "succeeded";
 
         });
 
@@ -702,7 +651,10 @@ function createRDSFromFormation(request, response, next, plan, vaultClient) {
             console.log(error, error.stack); // an error occurred
             //check to see if there is a stackId present
             if (data != null) {
-                updateStatus(request.id, request.params.organization_guid, request.params.space_guid, data.StackId, "failed");
+                var dbInstance = instances.get(request.params);
+                if (dbInstance != null) {
+                    dbInstance.status = "failed";
+                }
                 if (data.statusCode == "400") {
                     response.send(409);
                 }
@@ -762,20 +714,46 @@ function configureVaultMySQL(awsParameters, groupid, instanceID, vaultClient, st
                     };
 
                     //get the hostname of the new RDS instance
-                    var dbURL = S(stackData.Stacks[0].Outputs[0].OutputValue).chompLeft('jdbc:mysql://');
+                    var partialURL = S(stackData.Stacks[0].Outputs[0].OutputValue).between('//', '/');
+                    var fullURL = dbInstanceCredentials.userID + ":" + dbInstanceCredentials.password + "@tcp(" + partialURL + ")/" + awsParameters.Parameters[0].ParameterValue;
 
-                    path = process.env.VAULT_API_VERSION + mountPoint + process.env.VAULT_MYSQL_CONFIG_BASE;
-                    options = {
-                        connection_url: dbInstanceCredentials.userID + ":" + dbInstanceCredentials.password + "@tcp(" + dbURL + ")",
+                    var path = process.env.VAULT_API_VERSION + mountPoint + process.env.VAULT_MYSQL_CONFIG_BASE;
+                    var options = {
+                        connection_url: fullURL,
                         verify_connection: true
                     };
                     vaultClient.post(path, options)
                         .then(function (response) {
                             console.log(response);
-                            /*-----------------------------------------------------
-                             * 4. Create new read and write roles for new database
-                             * ----------------------------------------------------*/
+                            /*------------------------------------------
+                             * 4a. Create new read role for new database
+                             * ----------------------------------------*/
+                            var sql = S(readRoleTemplate).replace('<dbname>', awsParameters.Parameters[0].ParameterValue);
+                            var path = process.env.VAULT_API_VERSION + mountPoint + process.env.READ_ROLE_PATH;
 
+                            vaultClient.post(path, {"sql": sql.toString()})
+                                .then(function (response) {
+                                    console.log(response);
+
+                                })
+                                .catch(function (error) {
+                                    //TODO: What to do upon role creation failure?
+                                    console.log(error);
+                                });
+                            /*--------------------------------------------
+                             * 4b. Create new write role for new database
+                             * -------------------------------------------*/
+                            var sql = S(writeRoleTemplate).replace('<dbname>', awsParameters.Parameters[0].ParameterValue);
+                            var path = process.env.VAULT_API_VERSION + mountPoint + process.env.WRITE_ROLE_PATH;
+                            vaultClient.post(path, {"sql": sql.toString()})
+                                .then(function (response) {
+                                    console.log(response);
+
+                                })
+                                .catch(function (error) {
+                                    //TODO: What to do upon role creation failure?
+                                    console.log(error);
+                                });
 
                         });
                 })

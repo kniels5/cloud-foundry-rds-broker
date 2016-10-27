@@ -1,0 +1,6 @@
+{
+  "sql": [
+    "CREATE USER '{{name}}'@'%' IDENTIFIED BY '{{password}}';" ,
+    "GRANT ALTER,CREATE,INDEX,INSERT,SELECT,UPDATE ON <dbname>.* TO '{{name}}'@'%';"
+  ]
+}
